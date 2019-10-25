@@ -2,7 +2,7 @@
 
 #  qm.py -- A Quine McCluskey Python implementation
 #
-#  Copyright (c) 2006-2013  Thomas Pircher  <tehpeh@gmx.net>
+#  Copyright (c) 2006-2016  Thomas Pircher  <tehpeh-web@tty1.net>
 #
 #  Permission is hereby granted, free of charge, to any person obtaining a copy
 #  of this software and associated documentation files (the "Software"), to
@@ -40,6 +40,8 @@ terms of complexity of the output.
 
 from __future__ import print_function
 import math
+import itertools
+import re
 
 
 class QuineMcCluskey:
@@ -51,7 +53,7 @@ class QuineMcCluskey:
     If the class was instantiiated with the use_xor set to True, then the
     resulting boolean function may contain XOR and XNOR operators.
     """
-    __version__ = "0.2"
+    __version__ = "0.3"
 
 
 
@@ -82,7 +84,7 @@ class QuineMcCluskey:
 
 
 
-    def simplify(self, ones, dc = []):
+    def simplify(self, ones, dc = [], num_bits = None):
         """Simplify a list of terms.
 
         Args:
@@ -116,17 +118,20 @@ class QuineMcCluskey:
 
         # Calculate the number of bits to use
         # Needed internally by __num2str()
-        self.n_bits = int(math.ceil(math.log(max(terms) + 1, 2)))
+        if num_bits is not None:
+            self.n_bits = num_bits
+        else:
+            self.n_bits = int(math.ceil(math.log(max(terms) + 1, 2)))
 
         # Generate the sets of ones and dontcares
-        ones = set(self.__num2str(i) for i in ones)
-        dc = set(self.__num2str(i) for i in dc)
+        ones = [self.__num2str(i) for i in ones]
+        dc = [self.__num2str(i) for i in dc]
 
         return self.simplify_los(ones, dc)
 
 
 
-    def simplify_los(self, ones, dc = []):
+    def simplify_los(self, ones, dc = [], num_bits = None):
         """The simplification algorithm for a list of string-encoded inputs.
 
         Args:
@@ -134,7 +139,7 @@ class QuineMcCluskey:
             function is '1', e.g. ['0001', '0010', '0110', '1000', '1111'].
 
         Kwargs:
-            dc: (list of str)set of strings that define the don't care
+            dc: (list of str): list of strings that define the don't care
             combinations.
 
         Returns:
@@ -169,24 +174,28 @@ class QuineMcCluskey:
         self.profile_xor = 0    # number of comparisons (for profiling)
         self.profile_xnor = 0   # number of comparisons (for profiling)
 
-        terms = ones | dc
+        terms = set(ones) | set(dc)
         if len(terms) == 0:
             return None
 
         # Calculate the number of bits to use
-        self.n_bits = max(len(i) for i in terms)
-        if self.n_bits != min(len(i) for i in terms):
-            return None
+        if num_bits is not None:
+            self.n_bits = num_bits
+        else:
+            self.n_bits = max(len(i) for i in terms)
+            if self.n_bits != min(len(i) for i in terms):
+                return None
 
         # First step of Quine-McCluskey method.
         prime_implicants = self.__get_prime_implicants(terms)
 
         # Remove essential terms.
         essential_implicants = self.__get_essential_implicants(prime_implicants, set(dc))
-        # Insert here the Quine McCluskey step 2: prime implicant chart.
-        # Insert here Petrick's Method.
 
-        return essential_implicants
+        # Perform further reduction on essential implicants
+        reduced_implicants = self.__reduce_implicants(essential_implicants, set(dc))
+
+        return reduced_implicants
 
 
 
@@ -465,11 +474,12 @@ class QuineMcCluskey:
 
 
 
-    def permutations(self, value = ''):
+    def permutations(self, value = '', exclude={}):
         """Iterator to generate all possible values out of a string.
 
         Args:
             value (str): A string containing any of the above characters.
+            exclude (set): A set of values to skip (usually don't cares)
 
         Returns:
             The output strings contain only '0' and '1'.
@@ -566,4 +576,81 @@ class QuineMcCluskey:
             if i == n_bits:
                 direction = -1
                 i = n_bits - 1
-                yield "".join(res)
+                bitstring = "".join(res)
+                if int(bitstring, base=2) not in exclude:
+                    yield bitstring
+
+
+
+    def __reduce_implicants(self, implicants, dc):
+        def get_terms(implicant):
+            """Return the indexes for each type of token in given implicant string"""
+            term_ones = [m.start() for m in re.finditer(re.escape('1'), implicant)]
+            term_zeros = [m.start() for m in re.finditer(re.escape('0'), implicant)]
+            term_xors = [m.start() for m in re.finditer(re.escape('^'), implicant)]
+            term_xnors = [m.start() for m in re.finditer(re.escape('~'), implicant)]
+            term_dcs = [m.start() for m in re.finditer(re.escape('-'), implicant)]
+            return term_ones, term_zeros, term_xors, term_xnors, term_dcs
+
+        def complexity(implicant):    # Stub
+            ret = 0
+            term_ones, term_zeros, term_xors, term_xnors, _ = get_terms(implicant)
+            ret += 1.00 * len(term_ones)
+            ret += 1.50 * len(term_zeros)
+            ret += 1.25 * len(term_xors)
+            ret += 1.75 * len(term_xnors)
+            return ret
+
+        def combine_implicants(a, b):
+            permutations_a = set(self.permutations(a, exclude=dc))
+            permutations_b = set(self.permutations(b, exclude=dc))
+            _, _, _, _, a_term_dcs = get_terms(a)
+            _, _, _, _, b_term_dcs = get_terms(b)
+            a_potential, b_potential = list(a), list(b)
+            for index in a_term_dcs: a_potential[index] = b[index]
+            for index in b_term_dcs: b_potential[index] = a[index]
+            valid = [
+                x for x in [''.join(a_potential), ''.join(b_potential)]
+                if self.permutations(x, exclude=dc) == (permutations_a | permutations_b)
+            ]
+            if valid: return sorted(valid, key=complexity)[0]
+            return None
+
+        # Combine implicants in orthogonal spaces
+        while True:
+            for a, b in itertools.combinations(implicants, 2):
+                replacement = combine_implicants(a, b)
+                if replacement:
+                    implicants.remove(a)
+                    implicants.remove(b)
+                    implicants |= {replacement}
+                    break
+            else:
+                break
+
+        # Reduce redundant implicants further by comparing their coverage
+        coverage = {
+            implicant: {n for n in self.permutations(implicant) if n not in dc}
+            for implicant in implicants
+        }
+
+        while True:
+            redundant = []
+            for this_implicant in list(coverage):
+                this_coverage = coverage[this_implicant]
+                others_coverage = {
+                    n
+                    for other_implicant in [
+                        implicant for implicant in coverage.keys()
+                        if implicant != this_implicant
+                    ]
+                    for n in coverage[other_implicant]
+                }
+                if this_coverage.issubset(others_coverage): redundant.append(this_implicant)
+            if redundant:
+                worst = sorted(redundant, key=complexity, reverse=True)[0]
+                del coverage[worst]
+            else:
+                break
+        if not coverage: coverage = {'-'*self.n_bits: {}}
+        return set(coverage.keys())
